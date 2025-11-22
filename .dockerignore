@@ -1,0 +1,53 @@
+# Ignore Git metadata
+.git
+.gitignore
+
+# Ignore GitHub workflow helpers (not needed in container)
+.github
+
+# Ignore local build outputs
+meatloaf-server
+meatloaf-server.exe
+bin/
+build/
+dist/
+
+# Ignore editor junk
+*.swp
+*.swo
+*.tmp
+*~
+
+# Ignore IDE folders
+.vscode
+.idea
+*.code-workspace
+
+# Ignore OS cruft
+.DS_Store
+Thumbs.db
+
+# Ignore documentation — not needed in build context
+README.md
+AGENTS.md
+GETTING_STARTED.md
+DOCKER_HUB.md
+
+# Ignore test data
+/tests
+/testdata
+
+# Ignore anything not required by the build
+*.log
+
+# If you store your personal C64 files inside the repo (not recommended)
+# ignore them so they don't inflate the build context:
+*.d64
+*.d71
+*.d81
+*.prg
+*.p00
+*.tap
+*.t64
+*.crt
+*.rom
