@@ -32,7 +32,7 @@ Put `.d64`, `.prg`, `.tap`, `.crt`, etc. into this folder.
 
 ```powershell
 docker run -d `
-  -p 8080:80 `
+  -p 8080:8080 `
   -v C:\meatloaf:/data `
   wazpys/meatloaf-server:latest
 ```
@@ -40,7 +40,7 @@ docker run -d `
 ### macOS / Linux
 
 ```bash
-docker run -d   -p 8080:80   -v /home/you/meatloaf:/data   wazpys/meatloaf-server:latest
+docker run -d   -p 8080:8080   -v /home/you/meatloaf:/data   wazpys/meatloaf-server:latest
 ```
 
 ---
@@ -71,7 +71,7 @@ ifconfig | grep inet
 ip a
 ```
 
-Your IP will look like: `192.168.x.x` or `10.x.x.x`.
+Your IP will look something like: `192.168.x.x` or `10.x.x.x`.
 
 ---
 
@@ -85,7 +85,13 @@ Example:
 
 `http://192.168.1.42:8080/`
 
-If you're using a Meatloaf device, point it to the same URL.
+This will give you a default page to see so the connection works and the docker is running.
+
+If you're using a Meatloaf device, point it to the same URL like so:
+
+`LOAD"HTTP//192.168.1.42:8080",8`
+
+and you'll see a list of the files you are serving, ready to be `LOAD`ed!
 
 ---
 

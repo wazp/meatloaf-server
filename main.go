@@ -1,7 +1,10 @@
 // Meatloaf Server
-// Version: 1.0.0
+// Version: 1.1.1
 //
 // Changelog:
+// 1.1.1 - Fixed unescaped-space handling for Meatloaf firmware.
+//         Now normalizes paths like "Some File.d64" → "Some%20File.d64"
+//         Restores Apache/mod_rewrite behavior.
 // 1.1.0 - Added Content-Length, Last-Modified, and Accept-Ranges headers to file responses for improved performance.
 // 1.0.0 - Initial public release.
 //         Rewrites the original PHP Meatloaf server as a Go static binary.
@@ -16,6 +19,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,7 +230,7 @@ func isBinaryExt(path string) bool {
 	return ok
 }
 
-// HTML landing page – copied from your PHP script
+// HTML landing page – copied from PHP script
 const landingHTML = `<!doctype html>
 <html lang="en">
     <head>
@@ -309,8 +313,9 @@ func printVersion() {
 func main() {
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(versionFlag, "v", false, "Print version information and exit")
-	rootFlag := flag.String("root", ".", "Root directory to serve (equivalent to DOCUMENT_ROOT)")
-	addrFlag := flag.String("addr", ":80", "Address to listen on (e.g. :80, 0.0.0.0:8080)")
+
+	rootFlag := flag.String("root", ".", "Root directory to serve")
+	addrFlag := flag.String("addr", ":8080", "Address to listen on")
 	flag.Parse()
 
 	if *versionFlag {
@@ -330,23 +335,28 @@ func main() {
 			urlPath = "/"
 		}
 
-		localPath := filepath.Join(root, filepath.Clean(strings.TrimPrefix(urlPath, "/")))
+		// FIX: Escape unescaped spaces ("Game Name.d64" → "Game%20Name.d64")
+		if strings.Contains(urlPath, " ") {
+			urlPath = strings.ReplaceAll(urlPath, " ", "%20")
+		}
 
-		// If the path refers to an existing regular file, serve it directly
+		// FIX: Decode back into safe filesystem form
+		decoded, _ := url.PathUnescape(urlPath)
+		clean := filepath.Clean(strings.TrimPrefix(decoded, "/"))
+		localPath := filepath.Join(root, clean)
+
+		// Serve direct file if it exists
 		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-
-			// SPEED FIX: Make Meatloaf fast again by setting Content-Length
-    	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
-    	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
-    	w.Header().Set("Accept-Ranges", "bytes")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+			w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+			w.Header().Set("Accept-Ranges", "bytes")
 
 			if isBinaryExt(localPath) {
 				w.Header().Set("Content-Type", "application/octet-stream")
 			}
 
-    	// Must come AFTER setting headers
-    	http.ServeFile(w, r, localPath)
-    	return
+			http.ServeFile(w, r, localPath)
+			return
 		}
 
 		// Otherwise emulate index.php behavior
@@ -355,7 +365,7 @@ func main() {
 			w.Header().Set("Content-Disposition", `attachment; filename="index.prg"`)
 			w.Header().Set("Meatloaf-Debug", urlPath)
 
-			if err := sendListing(w, root, urlPath, r.Host); err != nil {
+			if err := sendListing(w, root, decoded, r.Host); err != nil {
 				log.Printf("sendListing error: %v", err)
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			}
@@ -371,6 +381,6 @@ func main() {
 
 	log.Printf("Serving %s on %s", root, *addrFlag)
 	if err := http.ListenAndServe(*addrFlag, nil); err != nil {
-		log.Fatal(err)
+			log.Fatal(err)
 	}
 }

@@ -19,8 +19,7 @@ WORKDIR /data
 # Copy binary only
 COPY --from=build /meatloaf-server /meatloaf-server
 
-EXPOSE 80
+EXPOSE 8080
 
-# Serve /data on port 80
-ENTRYPOINT ["/meatloaf-server", "-addr", ":80", "-root", "/data"]
-
+# Serve /data on port 8080 (default)
+ENTRYPOINT ["/meatloaf-server", "-addr", ":8080", "-root", "/data"]

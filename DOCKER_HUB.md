@@ -29,7 +29,7 @@ You can find more information about Meatloaf here:
 ## Quick Start
 
 ```bash
-docker run -d -p 8080:80 -v /path/to/c64/files:/data wazpys/meatloaf-server:latest
+docker run -d -p 8080:8080 -v /path/to/c64/files:/data:ro wazpys/meatloaf-server:latest
 ```
 
 Then visit:
@@ -59,7 +59,7 @@ services:
     image: wazpys/meatloaf-server:latest
     container_name: meatloaf
     ports:
-      - "8080:80"
+      - "8080:8080"
     volumes:
       # Change this path to the folder where your C64 files are stored
       - /path/to/c64/files:/data:ro
@@ -84,9 +84,15 @@ docker compose down
 
 - Replace `/path/to/c64/files` with the folder containing your C64 disk images
   and PRG files.
-- Replace `8080` with whatever port you want to expose.
+- Replace `8080:` with whatever port you want to expose. The internal port must always be 8080.
 - Files are mounted read-only by default (`:ro`).
 - The container does not modify your C64 files.
+
+### Prefer a native binary?
+
+Releases also include prebuilt archives for Linux, macOS, and Windows:
+<https://github.com/wazp/meatloaf-server/releases>.
+Extract the archive for your OS/CPU and run `meatloaf-server -root /path/to/files -addr :8080` (8080 avoids needing root/Administrator on most systems).
 
 ---
 
