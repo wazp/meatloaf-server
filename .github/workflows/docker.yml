@@ -1,5 +1,7 @@
 name: Build & Publish (Multi-Arch)
 
+permissions:
+  contents: write
 on:
   push:
     branches: ["main", "dev"]

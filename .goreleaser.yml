@@ -4,7 +4,6 @@ project_name: meatloaf-server
 
 before:
   hooks:
-    # keeps go.mod/go.sum tidy
     - go mod tidy
 
 builds:
@@ -33,13 +32,12 @@ archives:
     format: tar.gz
     format_overrides:
       - goos: windows
-        formats: ["zip"]
+        format: zip
 
 checksum:
   name_template: "checksums.txt"
 
-# Let GoReleaser infer GitHub repo from GITHUB_TOKEN / origin remote.
 release:
   github:
-    owner: "wazp" # this will be overridden by repo; safe placeholder
+    owner: wazp
     name: "{{ .ProjectName }}"
