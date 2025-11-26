@@ -1,7 +1,15 @@
 # Meatloaf Server
 
-A tiny Dockerized version of the original Meatloaf C64/128 directory listing server.
-Written in Go as a single static binary and packaged in a minimal `scratch` image.
+A tiny, blazing-fast replacement for the original Meatloaf PHP Server Script
+available at <https://gist.github.com/idolpx/ab8874f8396b6fa0d89cc9bab1e4dee2>
+written in Go.
+
+This server exposes a directory of Commodore 64 files (PRG, D64, T64, CRT,
+etc.) and returns either a normal HTML landing page or a C64-compatible BASIC
+directory listing (`index.prg`) for the Meatloaf device.
+
+You can find more information about Meatloaf here:
+<https://meatloaf.cc>
 
 ---
 
@@ -21,7 +29,7 @@ Written in Go as a single static binary and packaged in a minimal `scratch` imag
 ## Quick Start
 
 ```bash
-docker run -d   -p 8080:80   -v /path/to/c64/files:/data   yourdocker/meatloaf-server:latest
+docker run -d -p 8080:80 -v /path/to/c64/files:/data wazpys/meatloaf-server:latest
 ```
 
 Then visit:
@@ -30,16 +38,59 @@ Then visit:
 
 Or point your Meatloaf hardware to:
 
-`http://YOUR-IP:8080/`
+`http://YOUR-IP:8080/`, so on the C64 you'd type:
+`LOAD"HTTP://192.168.1.10:8080",8` if your IP is `192.168.1.10`. After this
+you can `LIST` the directory and load any file, as well as going into sub directories.
+
+For more information about Meatloaf and its usage, please visit <https://meatloaf.cc>
+or <https://github.com/idolpx/meatloaf>
+
+---
+
+## Docker Compose
+
+To use **docker compose**, create a file named `docker-compose.yml`:
+
+```
+version: "3.9"
+
+services:
+  meatloaf:
+    image: wazpys/meatloaf-server:latest
+    container_name: meatloaf
+    ports:
+      - "8080:80"
+    volumes:
+      # Change this path to the folder where your C64 files are stored
+      - /path/to/c64/files:/data:ro
+    restart: unless-stopped
+```
+
+Start the server:
+
+```
+docker compose up -d
+```
+
+Stop it:
+
+```
+docker compose down
+```
+
+---
+
+## Notes
+
+- Replace `/path/to/c64/files` with the folder containing your C64 disk images
+  and PRG files.
+- Replace `8080` with whatever port you want to expose.
+- Files are mounted read-only by default (`:ro`).
+- The container does not modify your C64 files.
 
 ---
 
 ## Source Code
 
 See the GitHub repository for source code, Dockerfile, and CI configuration.
-
----
-
-## License
-
-GPLv3 (matches original Meatloaf license)
+Can be found at: <https://github.com/wazp/meatloaf-server/>

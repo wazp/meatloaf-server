@@ -1,7 +1,8 @@
 // Meatloaf Server
 // Version: 1.0.0
-// 
+//
 // Changelog:
+// 1.1.0 - Added Content-Length, Last-Modified, and Accept-Ranges headers to file responses for improved performance.
 // 1.0.0 - Initial public release.
 //         Rewrites the original PHP Meatloaf server as a Go static binary.
 //         Supports directory listings, PRG generation, file serving, and HTML fallback.
@@ -23,6 +24,12 @@ import (
 const (
 	basicStart = 0x0401
 	headerText = "MEATLOAF ARCHIVE"
+)
+
+var (
+    version = "dev"
+    commit  = "none"
+    date    = "unknown"
 )
 
 // same exclusion semantics as the PHP preg_filter
@@ -279,7 +286,7 @@ MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
 				height: 80%;
 			}
 		</style>
-	
+
         <title>Meatloaf C64</title>
     </head>
     <body>
@@ -295,10 +302,21 @@ MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
 </html>
 `
 
+func printVersion() {
+    fmt.Printf("Meatloaf Server %s (%s, %s)\n", version, commit, date)
+}
+
 func main() {
+	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	flag.BoolVar(versionFlag, "v", false, "Print version information and exit")
 	rootFlag := flag.String("root", ".", "Root directory to serve (equivalent to DOCUMENT_ROOT)")
 	addrFlag := flag.String("addr", ":80", "Address to listen on (e.g. :80, 0.0.0.0:8080)")
 	flag.Parse()
+
+	if *versionFlag {
+		printVersion()
+		return
+	}
 
 	root, err := filepath.Abs(*rootFlag)
 	if err != nil {
@@ -316,11 +334,19 @@ func main() {
 
 		// If the path refers to an existing regular file, serve it directly
 		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+
+			// SPEED FIX: Make Meatloaf fast again by setting Content-Length
+    	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+    	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+    	w.Header().Set("Accept-Ranges", "bytes")
+
 			if isBinaryExt(localPath) {
 				w.Header().Set("Content-Type", "application/octet-stream")
 			}
-			http.ServeFile(w, r, localPath)
-			return
+
+    	// Must come AFTER setting headers
+    	http.ServeFile(w, r, localPath)
+    	return
 		}
 
 		// Otherwise emulate index.php behavior
@@ -348,4 +374,3 @@ func main() {
 		log.Fatal(err)
 	}
 }
-

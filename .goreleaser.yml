@@ -1,0 +1,45 @@
+# .goreleaser.yml
+project_name: meatloaf-server
+
+before:
+  hooks:
+    # keeps go.mod/go.sum tidy
+    - go mod tidy
+
+builds:
+  - id: meatloaf
+    main: ./main.go       # your main.go path
+    binary: meatloaf-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    builds:
+      - meatloaf
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+
+checksum:
+  name_template: "checksums.txt"
+
+# Let GoReleaser infer GitHub repo from GITHUB_TOKEN / origin remote.
+release:
+  github:
+    owner: "{{ .ProjectName }}" # this will be overridden by repo; safe placeholder
+    name: "{{ .ProjectName }}"
