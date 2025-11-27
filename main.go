@@ -1,7 +1,11 @@
 // Meatloaf Server
-// Version: 1.1.1
+// Version: 1.2.0
 //
 // Changelog:
+// 1.2.0 - Tracks per-client CWD (like Apache+PHP effectively do for Meatloaf).
+//         CWD-aware fallback:
+//         Direct path first (decoded URL).
+//         If that doesn't exist, try CWD + "/" + basename(path).
 // 1.1.1 - Fixed unescaped-space handling for Meatloaf firmware.
 //         Now normalizes paths like "Some File.d64" → "Some%20File.d64"
 //         Restores Apache/mod_rewrite behavior.
@@ -18,11 +22,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -31,12 +37,69 @@ const (
 )
 
 var (
-    version = "dev"
-    commit  = "none"
-    date    = "unknown"
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+
+	verbose bool // <-- NEW: verbose logging enabled
+
+	// Per-client current working directory (CWD)
+	clientCWD sync.Map
 )
 
-// same exclusion semantics as the PHP preg_filter
+//
+// -------------------- LOGGING -----------------------
+//
+
+// helper for verbose logs
+func vlog(format string, a ...interface{}) {
+	if verbose {
+		log.Printf(format, a...)
+	}
+}
+
+func logRequest(r *http.Request, decoded string, cwd string) {
+	if !verbose {
+		return
+	}
+
+	log.Printf("---- REQUEST ----")
+	log.Printf("RemoteAddr:     %s", r.RemoteAddr)
+
+	if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+		log.Printf("CF-Connecting-IP: %s", cf)
+	}
+
+	log.Printf("Method:         %s", r.Method)
+	log.Printf("Raw URL.Path:   %q", r.URL.Path)
+	log.Printf("Decoded Path:   %q", decoded)
+	log.Printf("User-Agent:     %q", r.UserAgent())
+	log.Printf("Query:          %v", r.URL.RawQuery)
+	log.Printf("Is Meatloaf UA: %v", isMeatloafUA(r.UserAgent()))
+	log.Printf("Client CWD:     %q", cwd)
+	log.Printf("-----------------")
+}
+
+//
+// -------------------- C64 Helpers -----------------------
+//
+
+func clientIP(r *http.Request) string {
+	if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+		return cf
+	}
+
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+//
+// -------------------- Directory listing -----------------------
+//
+
 func listDirFiltered(root, dir string) ([]string, error) {
 	absDir := filepath.Join(root, strings.TrimPrefix(dir, "/"))
 	entries, err := os.ReadDir(absDir)
@@ -48,24 +111,18 @@ func listDirFiltered(root, dir string) ([]string, error) {
 	for _, e := range entries {
 		name := e.Name()
 
-		// skip dotfiles and . / ..
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
 
 		lower := strings.ToLower(name)
 
-		// skip .html, .php
 		if strings.HasSuffix(lower, ".html") || strings.HasSuffix(lower, ".php") {
 			continue
 		}
-
-		// skip api
 		if lower == "api" {
 			continue
 		}
-
-		// skip web.config
 		if lower == "web.config" {
 			continue
 		}
@@ -91,7 +148,6 @@ func getType(root, dir, name string) string {
 	return strings.ToUpper(ext)
 }
 
-// uppercase ASCII like PHP's strtoupper (good enough for this use)
 func toUpperASCII(b []byte) {
 	for i, c := range b {
 		if c >= 'a' && c <= 'z' {
@@ -106,13 +162,10 @@ func writeUint16LE(w io.Writer, v uint16) error {
 	return err
 }
 
-// sendLine mimics PHP sendLine(): next pointer always 0x0101, line number = blocks
 func sendLine(w io.Writer, blocks uint16, line string) error {
-	// next line pointer (hard-coded in PHP)
 	if err := writeUint16LE(w, 0x0101); err != nil {
 		return err
 	}
-	// "line number" is actually blocks
 	if err := writeUint16LE(w, blocks); err != nil {
 		return err
 	}
@@ -125,29 +178,25 @@ func sendLine(w io.Writer, blocks uint16, line string) error {
 }
 
 func sendListing(w io.Writer, root, dir, host string) error {
-	// load address
 	if err := writeUint16LE(w, basicStart); err != nil {
 		return err
 	}
 
-	// HEADER line (truncate to 16 chars)
 	hdr := headerText
 	if len(hdr) > 16 {
 		hdr = hdr[:16]
 	}
-	// 0x12 is reverse-video control char
+
 	if err := sendLine(w, 0, "\x12\""+hdr+"\" 08 2A"); err != nil {
 		return err
 	}
 
-	// directory listing
 	entries, err := listDirFiltered(root, dir)
 	if err != nil {
-		// silently fall back to empty dir listing
+		vlog("listDirFiltered error for %q: %v (empty listing)", dir, err)
 		entries = []string{}
 	}
 
-	// extra info
 	if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", "[URL]")); err != nil {
 		return err
 	}
@@ -168,7 +217,6 @@ func sendListing(w io.Writer, root, dir, host string) error {
 		return err
 	}
 
-	// file entries
 	for _, name := range entries {
 		relPath := filepath.Join(strings.TrimPrefix(dir, "/"), name)
 		full := filepath.Join(root, relPath)
@@ -183,7 +231,7 @@ func sendListing(w io.Writer, root, dir, host string) error {
 
 		if typ != "DIR" {
 			size := info.Size()
-			blocks = uint16((size + 255) / 256) // ceil(size/256)
+			blocks = uint16((size + 255) / 256)
 
 			if blocks > 9 {
 				blockSpc--
@@ -204,17 +252,14 @@ func sendListing(w io.Writer, root, dir, host string) error {
 		}
 	}
 
-	// final line
 	if err := sendLine(w, 65535, "BLOCKS FREE"); err != nil {
 		return err
 	}
 
-	// end-of-program marker
 	_, err = w.Write([]byte{0x00, 0x00})
 	return err
 }
 
-// C64-ish extensions that should be sent as application/octet-stream
 var binaryExts = map[string]struct{}{
 	".bas": {}, ".prg": {}, ".p00": {},
 	".bin": {}, ".rom": {}, ".crt": {},
@@ -230,7 +275,10 @@ func isBinaryExt(path string) bool {
 	return ok
 }
 
-// HTML landing page – copied from PHP script
+//
+// -------------------- HTML landing page -----------------------
+//
+
 const landingHTML = `<!doctype html>
 <html lang="en">
     <head>
@@ -307,80 +355,210 @@ MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T" crossorigin="anonymous">
 `
 
 func printVersion() {
-    fmt.Printf("Meatloaf Server %s (%s, %s)\n", version, commit, date)
+	fmt.Printf("Meatloaf Server %s (%s, %s)\n", version, commit, date)
 }
 
-func main() {
+//
+// -------------------- Config -----------------------
+//
+
+type config struct {
+	version bool
+	root    string
+	addr    string
+}
+
+func parseConfig() config {
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
 	flag.BoolVar(versionFlag, "v", false, "Print version information and exit")
 
 	rootFlag := flag.String("root", ".", "Root directory to serve")
-	addrFlag := flag.String("addr", ":8080", "Address to listen on")
+	addrFlag := flag.String("addr", ":8080", "Address to listen on (e.g. :80, 0.0.0.0:8080)")
+
+	// NEW: verbose logging
+	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&verbose, "V", false, "Enable verbose logging")
+
 	flag.Parse()
 
-	if *versionFlag {
+	return config{
+		version: *versionFlag,
+		root:    *rootFlag,
+		addr:    *addrFlag,
+	}
+}
+
+//
+// -------------------- Server -----------------------
+//
+
+type server struct {
+	root string
+}
+
+//
+// -------------------- HTTP handler ----------------------
+//
+
+func (s *server) handle(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	isML := isMeatloafUA(r.UserAgent())
+
+	urlPath := normalizeURLPath(r.URL.Path)
+	decoded := decodePath(urlPath)
+
+	cwd := "/"
+	if v, ok := clientCWD.Load(ip); ok {
+		if str, ok2 := v.(string); ok2 && str != "" {
+			cwd = str
+		}
+	}
+
+	logRequest(r, decoded, cwd)
+
+	localPath := s.localPath(decoded)
+
+	// 1) Direct path exists
+	if info, err := os.Stat(localPath); err == nil {
+		if info.IsDir() && isML {
+			vlog("ACTION: direct directory listing for %q", decoded)
+			clientCWD.Store(ip, decoded)
+			s.serveListing(w, urlPath, decoded, r.Host)
+			return
+		}
+
+		if !info.IsDir() {
+			vlog("ACTION: direct file serve: %s", localPath)
+			s.serveFileWithInfo(w, r, localPath, info)
+			return
+		}
+	}
+
+	// 2) Fallback: CWD + basename
+	if isML && cwd != "" {
+		base := filepath.Base(decoded)
+		if base != "" && base != "." && base != "/" {
+			fallbackDecoded := filepath.Join(cwd, base)
+			fallbackLocal := s.localPath(fallbackDecoded)
+
+			if info2, err2 := os.Stat(fallbackLocal); err2 == nil {
+				if info2.IsDir() {
+					vlog("ACTION: fallback directory listing, CWD-based: %q", fallbackDecoded)
+					clientCWD.Store(ip, fallbackDecoded)
+					s.serveListing(w, urlPath, fallbackDecoded, r.Host)
+					return
+				}
+
+				vlog("ACTION: fallback file serve, CWD-based: %s", fallbackLocal)
+				s.serveFileWithInfo(w, r, fallbackLocal, info2)
+				return
+			}
+		}
+	}
+
+	// 3) Last resort listing
+	if isML {
+		if cwd != "" {
+			cwdLocal := s.localPath(cwd)
+			if info, err := os.Stat(cwdLocal); err == nil && info.IsDir() {
+				vlog("ACTION: last-resort directory listing using CWD %q", cwd)
+				s.serveListing(w, urlPath, cwd, r.Host)
+				return
+			}
+		}
+
+		vlog("ACTION: last-resort directory listing for %q", decoded)
+		if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+			clientCWD.Store(ip, decoded)
+		}
+		s.serveListing(w, urlPath, decoded, r.Host)
+		return
+	}
+
+	// 4) Non-meatloaf: landing
+	vlog("ACTION: landing page")
+	s.serveLanding(w)
+}
+
+func normalizeURLPath(urlPath string) string {
+	if urlPath == "" {
+		return "/"
+	}
+	if strings.Contains(urlPath, " ") {
+		return strings.ReplaceAll(urlPath, " ", "%20")
+	}
+	return urlPath
+}
+
+func decodePath(urlPath string) string {
+	decoded, _ := url.PathUnescape(urlPath)
+	return decoded
+}
+
+func (s *server) localPath(decoded string) string {
+	clean := filepath.Clean(strings.TrimPrefix(decoded, "/"))
+	return filepath.Join(s.root, clean)
+}
+
+func (s *server) serveFileWithInfo(w http.ResponseWriter, r *http.Request, localPath string, info os.FileInfo) {
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	if isBinaryExt(localPath) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+
+	http.ServeFile(w, r, localPath)
+}
+
+func (s *server) serveListing(w http.ResponseWriter, urlPath, dirToList, host string) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="index.prg"`)
+	w.Header().Set("Meatloaf-Debug", urlPath)
+
+	if err := sendListing(w, s.root, dirToList, host); err != nil {
+		log.Printf("sendListing error: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+func (s *server) serveLanding(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	io.WriteString(w, landingHTML)
+}
+
+func isMeatloafUA(userAgent string) bool {
+	return strings.Contains(userAgent, "MEATLOAF")
+}
+
+//
+// -------------------- Main -----------------------
+//
+
+func main() {
+	cfg := parseConfig()
+
+	if cfg.version {
 		printVersion()
 		return
 	}
 
-	root, err := filepath.Abs(*rootFlag)
+	root, err := filepath.Abs(cfg.root)
 	if err != nil {
 		log.Fatalf("failed to resolve root: %v", err)
 	}
 
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		// Normalized path with leading slash
-		urlPath := r.URL.Path
-		if urlPath == "" {
-			urlPath = "/"
-		}
+	srv := &server{root: root}
 
-		// FIX: Escape unescaped spaces ("Game Name.d64" → "Game%20Name.d64")
-		if strings.Contains(urlPath, " ") {
-			urlPath = strings.ReplaceAll(urlPath, " ", "%20")
-		}
+	http.HandleFunc("/", srv.handle)
 
-		// FIX: Decode back into safe filesystem form
-		decoded, _ := url.PathUnescape(urlPath)
-		clean := filepath.Clean(strings.TrimPrefix(decoded, "/"))
-		localPath := filepath.Join(root, clean)
-
-		// Serve direct file if it exists
-		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
-			w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
-			w.Header().Set("Accept-Ranges", "bytes")
-
-			if isBinaryExt(localPath) {
-				w.Header().Set("Content-Type", "application/octet-stream")
-			}
-
-			http.ServeFile(w, r, localPath)
-			return
-		}
-
-		// Otherwise emulate index.php behavior
-		if strings.Contains(r.UserAgent(), "MEATLOAF") {
-			w.Header().Set("Content-Type", "application/octet-stream")
-			w.Header().Set("Content-Disposition", `attachment; filename="index.prg"`)
-			w.Header().Set("Meatloaf-Debug", urlPath)
-
-			if err := sendListing(w, root, decoded, r.Host); err != nil {
-				log.Printf("sendListing error: %v", err)
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-			}
-			return
-		}
-
-		// Non-Meatloaf: show landing HTML
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, landingHTML)
+	log.Printf("Serving %s on %s", root, cfg.addr)
+	if verbose {
+		log.Printf("Verbose logging enabled")
 	}
 
-	http.HandleFunc("/", handler)
-
-	log.Printf("Serving %s on %s", root, *addrFlag)
-	if err := http.ListenAndServe(*addrFlag, nil); err != nil {
-			log.Fatal(err)
+	if err := http.ListenAndServe(cfg.addr, nil); err != nil {
+		log.Fatal(err)
 	}
 }
