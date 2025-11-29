@@ -1,0 +1,71 @@
+services:
+  # Basic test runner
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/src
+    working_dir: /src
+    command: go test -v ./...
+
+  # Test with coverage report
+  test-coverage:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/src
+    working_dir: /src
+    command: >
+      sh -c "
+        go test -v -coverprofile=coverage.out ./... &&
+        go tool cover -html=coverage.out -o coverage.html &&
+        echo 'Coverage report generated: coverage.html' &&
+        go tool cover -func=coverage.out
+      "
+
+  # Run benchmarks
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/src
+    working_dir: /src
+    command: go test -bench=. -benchmem ./...
+
+  # Debug server with test data
+  debug-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/src
+      - ./testdata:/data
+    working_dir: /src
+    ports:
+      - "8080:8080"
+    command: go run . -verbose -addr :8080 -root /data
+    depends_on:
+      - setup-testdata
+
+  # Setup test data
+  setup-testdata:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    volumes:
+      - .:/src
+    working_dir: /src
+    command: >
+      sh -c "
+        mkdir -p testdata/games testdata/demos testdata/music &&
+        echo 'Test PRG file' > testdata/games/game1.prg &&
+        echo 'Test SEQ file' > testdata/games/data.seq &&
+        echo 'Test USR file' > testdata/games/music.usr &&
+        echo 'Demo file' > testdata/demos/demo.prg &&
+        echo 'Music file' > testdata/music/song.prg &&
+        dd if=/dev/zero of=testdata/games/test.d64 bs=1024 count=171 2>/dev/null &&
+        echo 'Test data created in testdata/'
+      "

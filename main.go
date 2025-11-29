@@ -1,7 +1,12 @@
 // Meatloaf Server
-// Version: 1.2.0
+// Version: 1.3.0
 //
 // Changelog:
+// 1.3.0 - Fixed CD command context handling via trailing-slash redirects:
+//         - Added directory-to-trailing-slash redirects for proper firmware URL context
+//         - CD commands now work correctly on the Meatloaf firmware purely via URL/path
+//         - Cleaned up excessive debug logging while preserving functionality
+//         - Removed CMD-style directory support for now (pure CBM listings only)
 // 1.2.0 - Tracks per-client CWD (like Apache+PHP effectively do for Meatloaf).
 //         CWD-aware fallback:
 //         Direct path first (decoded URL).
@@ -41,7 +46,7 @@ var (
 	commit  = "none"
 	date    = "unknown"
 
-	verbose bool // <-- NEW: verbose logging enabled
+	verbose bool // verbose logging enabled
 
 	// Per-client current working directory (CWD)
 	clientCWD sync.Map
@@ -178,10 +183,12 @@ func sendLine(w io.Writer, blocks uint16, line string) error {
 }
 
 func sendListing(w io.Writer, root, dir, host string) error {
+	// Send basic load address
 	if err := writeUint16LE(w, basicStart); err != nil {
 		return err
 	}
 
+	// HEADER line (truncate to 16 chars)
 	hdr := headerText
 	if len(hdr) > 16 {
 		hdr = hdr[:16]
@@ -191,12 +198,7 @@ func sendListing(w io.Writer, root, dir, host string) error {
 		return err
 	}
 
-	entries, err := listDirFiltered(root, dir)
-	if err != nil {
-		vlog("listDirFiltered error for %q: %v (empty listing)", dir, err)
-		entries = []string{}
-	}
-
+	// NFO lines
 	if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", "[URL]")); err != nil {
 		return err
 	}
@@ -204,17 +206,31 @@ func sendListing(w io.Writer, root, dir, host string) error {
 		return err
 	}
 
-	if len(dir) > 1 {
-		if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", "[PATH]")); err != nil {
-			return err
-		}
-		if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", dir)); err != nil {
-			return err
-		}
+	// ALWAYS send PATH info - this is critical for firmware CD context
+	if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", "[PATH]")); err != nil {
+		return err
+	}
+
+	// Ensure path has trailing slash for non-root, like the PHP server
+	pathForContext := dir
+	if len(dir) > 1 && !strings.HasSuffix(pathForContext, "/") {
+		pathForContext += "/"
+	}
+
+	vlog("Serving directory listing - URL: %s, PATH: %s", host, pathForContext)
+
+	if err := sendLine(w, 0, fmt.Sprintf("\"%-19s\" NFO", pathForContext)); err != nil {
+		return err
 	}
 
 	if err := sendLine(w, 0, "\"-------------------\" NFO"); err != nil {
 		return err
+	}
+
+	entries, err := listDirFiltered(root, dir)
+	if err != nil {
+		vlog("listDirFiltered error for %q: %v (empty listing)", dir, err)
+		entries = []string{}
 	}
 
 	for _, name := range entries {
@@ -375,7 +391,7 @@ func parseConfig() config {
 	rootFlag := flag.String("root", ".", "Root directory to serve")
 	addrFlag := flag.String("addr", ":8080", "Address to listen on (e.g. :80, 0.0.0.0:8080)")
 
-	// NEW: verbose logging
+	// verbose logging
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&verbose, "V", false, "Enable verbose logging")
 
@@ -394,6 +410,7 @@ func parseConfig() config {
 
 type server struct {
 	root string
+	addr string
 }
 
 //
@@ -407,6 +424,25 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	urlPath := normalizeURLPath(r.URL.Path)
 	decoded := decodePath(urlPath)
 
+	// Optional PHP-style query parameter (for backwards compatibility)
+	if p := r.URL.Query().Get("p"); p != "" {
+		vlog("Found 'p' query parameter: %q", p)
+		decoded = decodePath(p)
+		urlPath = p
+	}
+
+	// Firmware bug: Host header may lose port; reconstruct host:port for NFO/debug
+	correctHost := r.Host
+	if !strings.Contains(correctHost, ":") {
+		if s.addr != "" && strings.Contains(s.addr, ":") {
+			parts := strings.Split(s.addr, ":")
+			if len(parts) == 2 && parts[1] != "80" && parts[1] != "443" && parts[1] != "" {
+				correctHost = correctHost + ":" + parts[1]
+				vlog("Host header missing port, corrected to: %q", correctHost)
+			}
+		}
+	}
+
 	cwd := "/"
 	if v, ok := clientCWD.Load(ip); ok {
 		if str, ok2 := v.(string); ok2 && str != "" {
@@ -415,68 +451,111 @@ func (s *server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logRequest(r, decoded, cwd)
+	vlog("Request: %s %s from %s (Meatloaf: %v, CWD: %q)", r.Method, decoded, ip, isML, cwd)
 
-	localPath := s.localPath(decoded)
+	// Apache-style: if <path>/index.prg exists, serve it directly (before anything else)
+	if !strings.HasSuffix(decoded, "/") {
+		indexPrgPath := filepath.Join(s.localPath(decoded), "index.prg")
+		if info, err := os.Stat(indexPrgPath); err == nil && !info.IsDir() {
+			vlog("Apache rule: serving index.prg from %s", indexPrgPath)
+			s.serveFileWithInfo(w, r, indexPrgPath, info)
+			return
+		}
+	}
 
-	// 1) Direct path exists
-	if info, err := os.Stat(localPath); err == nil {
+	// For all logic below, we use a filesystem-decoded path
+	fsDecoded := decoded
+
+	// Try to resolve exact / case-insensitive match for the decoded path
+	localPath, info, ok := s.findFileIgnoreCase(fsDecoded)
+
+	// 1) Direct path exists (file or directory)
+	if ok {
 		if info.IsDir() && isML {
-			vlog("ACTION: direct directory listing for %q", decoded)
-			clientCWD.Store(ip, decoded)
-			s.serveListing(w, urlPath, decoded, r.Host)
+			// For directories, redirect to trailing slash to establish firmware URL context
+			if !strings.HasSuffix(urlPath, "/") {
+				redirectURL := urlPath + "/"
+				vlog("Redirecting directory %q -> %q (establishing firmware context)", urlPath, redirectURL)
+				http.Redirect(w, r, redirectURL, http.StatusMovedPermanently)
+				return
+			}
+
+			vlog("Serving directory listing: %q", fsDecoded)
+			clientCWD.Store(ip, fsDecoded)
+			s.serveListing(w, urlPath, fsDecoded, correctHost)
 			return
 		}
 
 		if !info.IsDir() {
-			vlog("ACTION: direct file serve: %s", localPath)
+			vlog("Serving file: %s", localPath)
 			s.serveFileWithInfo(w, r, localPath, info)
 			return
 		}
 	}
 
-	// 2) Fallback: CWD + basename
+	// 2) Fallback: CWD + basename (for Meatloaf requests)
 	if isML && cwd != "" {
-		base := filepath.Base(decoded)
+		base := filepath.Base(fsDecoded)
 		if base != "" && base != "." && base != "/" {
 			fallbackDecoded := filepath.Join(cwd, base)
-			fallbackLocal := s.localPath(fallbackDecoded)
+			fallbackLocal, info2, ok2 := s.findFileIgnoreCase(fallbackDecoded)
 
-			if info2, err2 := os.Stat(fallbackLocal); err2 == nil {
+			if ok2 {
 				if info2.IsDir() {
-					vlog("ACTION: fallback directory listing, CWD-based: %q", fallbackDecoded)
+					// Redirect fallback directories to trailing slash too
+					if !strings.HasSuffix(urlPath, "/") {
+						redirectURL := urlPath + "/"
+						vlog("Fallback directory redirect %q -> %q", urlPath, redirectURL)
+						http.Redirect(w, r, redirectURL, http.StatusMovedPermanently)
+						return
+					}
+
+					vlog("Fallback directory listing (CWD-based): %q", fallbackDecoded)
 					clientCWD.Store(ip, fallbackDecoded)
-					s.serveListing(w, urlPath, fallbackDecoded, r.Host)
+					s.serveListing(w, urlPath, fallbackDecoded, correctHost)
 					return
 				}
 
-				vlog("ACTION: fallback file serve, CWD-based: %s", fallbackLocal)
+				vlog("Fallback file serve (CWD-based): %s", fallbackLocal)
 				s.serveFileWithInfo(w, r, fallbackLocal, info2)
 				return
 			}
 		}
 	}
 
-	// 3) Last resort listing
+	// 3) Last resort for Meatloaf: directory-only fallback
 	if isML {
-		if cwd != "" {
-			cwdLocal := s.localPath(cwd)
-			if info, err := os.Stat(cwdLocal); err == nil && info.IsDir() {
-				vlog("ACTION: last-resort directory listing using CWD %q", cwd)
-				s.serveListing(w, urlPath, cwd, r.Host)
+		// Only treat as directory last-resort if decoded path has NO extension
+		if filepath.Ext(fsDecoded) == "" {
+			// Direct path is an existing directory (case-insensitive)?
+			if lp3, info3, ok3 := s.findFileIgnoreCase(fsDecoded); ok3 && info3.IsDir() {
+				_ = lp3 // path not needed for listing
+				vlog("Last-resort directory listing: %q", fsDecoded)
+				clientCWD.Store(ip, fsDecoded)
+				s.serveListing(w, urlPath, fsDecoded, correctHost)
 				return
+			}
+
+			// CWD directory listing fallback
+			if cwd != "" {
+				cwdLocal, info4, ok4 := s.findFileIgnoreCase(cwd)
+				if ok4 && info4.IsDir() {
+					_ = cwdLocal
+					vlog("Last-resort directory listing using CWD: %q", cwd)
+					s.serveListing(w, urlPath, cwd, correctHost)
+					return
+				}
 			}
 		}
 
-		vlog("ACTION: last-resort directory listing for %q", decoded)
-		if info, err := os.Stat(localPath); err == nil && info.IsDir() {
-			clientCWD.Store(ip, decoded)
-		}
-		s.serveListing(w, urlPath, decoded, r.Host)
+		// Not a directory, not found as file → 404
+		vlog("File not found: %q", decoded)
+		http.NotFound(w, r)
 		return
 	}
 
 	// 4) Non-meatloaf: landing
-	vlog("ACTION: landing page")
+	vlog("Serving HTML landing page")
 	s.serveLanding(w)
 }
 
@@ -500,6 +579,37 @@ func (s *server) localPath(decoded string) string {
 	return filepath.Join(s.root, clean)
 }
 
+// findFileIgnoreCase attempts to find a file or directory with case-insensitive matching
+// Returns the actual file system path, its FileInfo, and a bool indicating success.
+func (s *server) findFileIgnoreCase(decoded string) (string, os.FileInfo, bool) {
+	// First try exact match
+	localPath := s.localPath(decoded)
+	if info, err := os.Stat(localPath); err == nil {
+		return localPath, info, true
+	}
+
+	// If exact match fails, try case-insensitive search within the parent directory
+	dir := filepath.Dir(decoded)
+	filename := filepath.Base(decoded)
+
+	dirPath := s.localPath(dir)
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return localPath, nil, false
+	}
+
+	for _, entry := range entries {
+		if strings.EqualFold(entry.Name(), filename) {
+			actualPath := filepath.Join(dirPath, entry.Name())
+			if info, err := os.Stat(actualPath); err == nil {
+				return actualPath, info, true
+			}
+		}
+	}
+
+	return localPath, nil, false
+}
+
 func (s *server) serveFileWithInfo(w http.ResponseWriter, r *http.Request, localPath string, info os.FileInfo) {
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 	w.Header().Set("Last-Modified", info.ModTime().UTC().Format(http.TimeFormat))
@@ -507,6 +617,9 @@ func (s *server) serveFileWithInfo(w http.ResponseWriter, r *http.Request, local
 
 	if isBinaryExt(localPath) {
 		w.Header().Set("Content-Type", "application/octet-stream")
+		// For file downloads, set Content-Disposition with actual filename
+		filename := filepath.Base(localPath)
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	}
 
 	http.ServeFile(w, r, localPath)
@@ -514,8 +627,16 @@ func (s *server) serveFileWithInfo(w http.ResponseWriter, r *http.Request, local
 
 func (s *server) serveListing(w http.ResponseWriter, urlPath, dirToList, host string) {
 	w.Header().Set("Content-Type", "application/octet-stream")
+	// Tells the firmware this response contains a directory listing PRG
 	w.Header().Set("Content-Disposition", `attachment; filename="index.prg"`)
-	w.Header().Set("Meatloaf-Debug", urlPath)
+
+	// Meatloaf-Debug header must contain full URL context for firmware CD behavior
+	// Format: http://host/path/ (with trailing slash for directories)
+	debugContext := fmt.Sprintf("http://%s%s", host, urlPath)
+	if !strings.HasSuffix(debugContext, "/") {
+		debugContext += "/"
+	}
+	w.Header().Set("Meatloaf-Debug", debugContext)
 
 	if err := sendListing(w, s.root, dirToList, host); err != nil {
 		log.Printf("sendListing error: %v", err)
@@ -549,7 +670,7 @@ func main() {
 		log.Fatalf("failed to resolve root: %v", err)
 	}
 
-	srv := &server{root: root}
+	srv := &server{root: root, addr: cfg.addr}
 
 	http.HandleFunc("/", srv.handle)
 
