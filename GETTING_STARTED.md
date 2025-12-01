@@ -89,7 +89,7 @@ This will give you a default page to see so the connection works and the docker 
 
 If you're using a Meatloaf device, point it to the same URL like so:
 
-`LOAD"HTTP//192.168.1.42:8080",8`
+`LOAD"HTTP://192.168.1.42:8080",8`
 
 and you'll see a list of the files you are serving, ready to be `LOAD`ed!
 

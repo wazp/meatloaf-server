@@ -23,6 +23,14 @@ Read more about Meatloaf:
 - 📁 **File server for all major C64 formats**
   `.d64`, `.prg`, `.t64`, `.tap`, `.crt`, `.rom`, etc.
 
+- 🎯 **CMD-style directory commands**
+  Support for advanced directory listings like `$=T` (sort by type), `$=P` (programs only), `$=U` (unsorted), with wildcard patterns and type filters.
+
+- 🎮 **Smart Filename Handling**
+  - **16-Character Limit**: Filenames automatically truncated to CBM standard
+  - **PETSCII Conversion**: Problematic characters converted for clean display (underscore → dash etc)
+  - **Intelligent Matching**: Load files using the exact names shown in directories - what you see is what you can LOAD
+
 - 🧭 **Directory navigation**
   Full support for directory navigation. The firmware handles CD commands locally and constructs appropriate HTTP requests.
 
@@ -91,18 +99,37 @@ Flags:
 LOAD"HTTP://192.168.1.42:8080",8
 LIST
 ```
-`LOAD"HTTP//192.168.1.42:8080",8`
 
 **Directory navigation:**
 ```basic
 LOAD"HTTP://192.168.1.42:8080/GAMES",8   : REM Navigate to GAMES directory
 LOAD"SUBDIR",8                           : REM Navigate to subdirectory (relative)
 LOAD"HTTP://192.168.1.42:8080/",8        : REM Go to server root
-LOAD"HTTP://192.168.1.42:8080/PARENT",8  : REM Navigate to parent directory 
+LOAD"HTTP://192.168.1.42:8080/PARENT",8  : REM Navigate to parent directory
 LOAD"$",8                                : REM List current directory
 ```
 
-**⚠️ Known Issue:** CD up commands (`LOAD"CD_",8`) may not work consistently with all servers. Your server now includes Apache-compatible CD command handling that processes CD requests server-side. If CD commands don't work, use full HTTP URLs for navigation instead.
+**CMD-style advanced listings:**
+```basic
+LOAD"HTTP://192.168.1.42:8080/$=P",8     : REM Programs + directories only
+LOAD"HTTP://192.168.1.42:8080/$=S",8     : REM Sequential files only
+LOAD"HTTP://192.168.1.42:8080/$=U",8     : REM User files only
+LOAD"HTTP://192.168.1.42:8080/$=D",8     : REM Directories only
+LOAD"HTTP://192.168.1.42:8080/$GAME*",8  : REM Files starting with "GAME"
+LOAD"HTTP://192.168.1.42:8080/$GAME*=P",8 : REM Programs starting with "GAME"
+LOAD"HTTP://192.168.1.42:8080/$=P:GAME*",8 : REM CMD colon syntax
+```
+
+**Smart filename handling:**
+```basic
+REM Directory shows truncated/converted names for compatibility
+LOAD"$",8                                : REM Shows "MYVERYLONGNAM" for long files
+LIST
+
+REM Load using the displayed name - server finds the actual file automatically
+LOAD"MYVERYLONGNAM",8                     : REM Loads "MyVeryLongNamedFile.prg"
+LOAD"FILE-NAME.SEQ",8                     : REM Loads "file_name.seq" (dash→underscore)
+```
 
 You should see a BASIC-style listing of your served files, ready to `LOAD`.
 
@@ -174,7 +201,7 @@ docker compose -f docker-compose.test.yml run --rm test
 # Run tests with coverage report (generates coverage.html)
 docker compose -f docker-compose.test.yml run --rm test-coverage
 
-# Run performance benchmarks  
+# Run performance benchmarks
 docker compose -f docker-compose.test.yml run --rm benchmark
 
 # Start a debug server with test data for manual testing
@@ -191,20 +218,22 @@ docker compose -f docker-compose.test.yml down
 
 The tests cover:
 - ✅ User-Agent detection (Meatloaf vs regular browsers)
-- ✅ CMD command parsing (`$=T`, `$=P`, `$=U` with patterns and filters)
+- ✅ CMD command parsing (`$=P`, `$=S`, `$=U`, `$=D` with patterns and filters)
 - ✅ Wildcard pattern matching (CBM-style `*` and `?`)
 - ✅ Directory listing generation (CBM and CMD formats)
 - ✅ BASIC program structure validation
 - ✅ File serving for different formats
 - ✅ CWD tracking and fallback logic
 - ✅ Binary file detection and content-type headers
+- ✅ Smart filename handling (16-char truncation + PETSCII conversion)
+- ✅ Intelligent file matching (truncated/converted name → actual file)
 
 ### Adding New Tests
 
 Tests are in `main_test.go`. To add new functionality tests:
 
 1. Add test cases to the relevant `Test*` function
-2. For CMD features, add cases to `TestCmdDirectoryListings`  
+2. For CMD features, add cases to `TestCmdDirectoryListings`
 3. Run tests: `docker compose -f docker-compose.test.yml run --rm test`
 
 **Benchmark Results:**
@@ -228,8 +257,28 @@ Then test CMD commands on your C64:
 REM Basic directory
 LOAD"HTTP://YOUR.SERVER.IP:8080",8
 LIST
+
+REM CMD-style commands
+LOAD"HTTP://YOUR.SERVER.IP:8080/$=P",8     : REM Programs only
+LOAD"HTTP://YOUR.SERVER.IP:8080/$=S",8     : REM Sequential files only
+LOAD"HTTP://YOUR.SERVER.IP:8080/$GAME*",8  : REM Files starting with GAME
+LOAD"HTTP://YOUR.SERVER.IP:8080/$=P:GAME*",8 : REM CMD colon syntax
+
+REM Smart filename loading (load truncated names from directory listings)
+LOAD"VERYLONGFILENA",8                     : REM Loads actual long filename
+LOAD"FILE-NAME.PRG",8                      : REM Loads "file_name.prg"
+
+REM CD navigation commands
+LOAD"HTTP://YOUR.SERVER.IP:8080/GAMES",8   : REM Navigate to games
+LOAD"CD..",8                               : REM Go up one level
+LOAD"CD//",8                               : REM Go to server root
+LOAD"CD:DEMOS",8                           : REM Go to demos folder
 ```
 
+**Troubleshooting:**
+- **Directory navigation**: CD commands are handled by the Meatloaf firmware, which constructs appropriate HTTP requests to the server. The server responds like the original PHP implementation - no special CD handling needed. The firmware uses the `Content-Disposition: attachment; filename="index.prg"` header to detect directory listings and maintain server context.
+- **Query parameter support**: The server supports both path-based requests (`/CD..`) and PHP-style query parameters (`/?p=CD..`) for compatibility with different firmware versions.
+- For debugging: The server logs every HTTP request with comprehensive details to help troubleshoot connectivity issues.
 
 ---
 
